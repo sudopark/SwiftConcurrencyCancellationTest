@@ -32,10 +32,12 @@ final class AsyncWorker {
     
     func makeRandIntVerySlowly() async throws -> Int {
         // 5. task가 cancel됨에 따라 이미 실행중(여기서는 sleep?) 임에도 불구하고 해당 구문이 끝나게 되며
-        try await Task.sleep(nanoseconds: 1_000_000_000 * 100) // sleep for 100 seconds
+//        try await Task.sleep(nanoseconds: 1_000_000_000 * 100) // sleep for 100 seconds
+        try await Task.sleep(nanoseconds: 1_000_000_000 * 3) // sleep for 3 seconds
         return Int.random(in: 1...10)
     }
 }
+
 
 
 final class SecondViewModel {
@@ -45,14 +47,21 @@ final class SecondViewModel {
         self.worker = worker
     }
     
+    private var resultInt: Int?
     private var task: Task<Void, Error>?
+    private var task2: Task<Void, Error>?
     
     deinit {
         // 3 다행히 vm은 view의 라이프사이클에 맞추어 해제될 수 있고
         print("deinit secondViewModel")
         // 4. 이경우 앞서 detach 시킨 task를 cancel시킴
+        
+        // 7. task cancel을 안시킨다면 task에 의해 캡처된 worker는 끝날때까지 메모리 해제가 안됨
+        // + 그리고 Task 생성시에 vm도 같이 캡처되었다면 역시 메모리 해제 안될거임
         self.task?.cancel()
+        self.task2?.cancel()
         self.task = nil
+        self.task2 = nil
     }
     
     func makeInt() {
@@ -62,11 +71,23 @@ final class SecondViewModel {
         self.task = Task.detached { [weak self] in
             do {
                 let int = try await self?.worker.makeRandIntVerySlowly()
-                print("int made -> \(int)")
+                print("case1: int made -> \(int)")
+                self?.resultInt = int
             } catch {
                 // 7. task 취소로 인하여 여기서 error(CancellationError)가 catch되지만 이미 vm, worker는 해제된 상태이고
                 // 8. 해당 operation을 소유하는 주체는 task일것이라 예상(task는 struct)
-                print("make int error: \(error)")
+                print("case1: make int error: \(error)")
+            }
+        }
+        
+        self.task2 = Task { [weak self] in
+            do {
+                let int = try await self?.worker.makeRandIntVerySlowly()
+                print("case2: int made -> \(int)")
+                self?.resultInt = int
+            }
+            catch {
+                print("case2: make int error: \(error)")
             }
         }
     }
