@@ -44,7 +44,6 @@ final class AsyncWorker {
 
 
 // 2-2. 이경우 SecondViewModel을 메인엑터로 바꾸고
-@MainActor
 final class SecondViewModel {
     
     private let worker: AsyncWorker
@@ -81,6 +80,7 @@ final class SecondViewModel {
 //                print("case1: int made -> \(int)")
                 // 2-1. task의 결과로 self.resultInt를 수정시에 race condition이 발생함
 //                self?.resultInt = int
+                print("## detached -> \(Thread.current)")
             } catch {
                 // 7. task 취소로 인하여 여기서 error(CancellationError)가 catch되지만 이미 vm, worker는 해제된 상태이고
                 // 8. 해당 operation을 소유하는 주체는 task일것이라 예상(task는 struct)
@@ -88,24 +88,26 @@ final class SecondViewModel {
             }
         }
         
-        self.task2 = Task { [weak self] in
-            do {
-                let int = try await self?.worker.makeRandIntVerySlowly()
-                print("## case2: int made -> \(int)")
-                self?.resultInt = int
-            }
-            catch {
-                print("case2: make int error: \(error)")
-            }
-        }
+//        self.task2 = Task { [weak self] in
+//            do {
+//                let int = try await self?.worker.makeRandIntVerySlowly()
+//                print("## case2: int made -> \(int)")
+//                self?.resultInt = int
+//            }
+//            catch {
+//                print("case2: make int error: \(error)")
+//            }
+//        }
         
         self.tasks = (0..<100).map { seq -> Task<Void, Error> in
-            Task { [weak self] in
+            Task.detached { [weak self] in
                 do {
                     let _ = try await self?.worker.makeRandIntVerySlowly()
                     // 2-4.위의 작업들은 vm이 MainActor라서 순차적으로 작업이 진행되지 않더라도 raceCondition은 발생안함
-                    self?.resultInt = (self?.resultInt ?? 0) + 1
-                    print("case3: int made -> seq: \(seq) \(resultInt)")
+//                    self?.resultInt = (self?.resultInt ?? 0) + 1
+//                    print("case3: int made -> seq: \(seq) \(self?.resultInt) thread: \(Thread.current)")
+                    print("thread: \(Thread.current)")
+                    await self?.increaseInt(seq)
                 }
                 catch {
                     print("case3: make int error: \(error)")
@@ -114,11 +116,11 @@ final class SecondViewModel {
         }
     }
     
-//    @MainActor
-//    private func increaseInt(_ seq: Int) {
-//        self.resultInt = (self.resultInt ?? 0) + 1
-//        print("case3: int made -> seq: \(seq) \(resultInt)")
-//    }
+    @MainActor
+    private func increaseInt(_ seq: Int) {
+        self.resultInt = (self.resultInt ?? 0) + 1
+        print("case3: int made -> seq: \(seq) \(resultInt) thraed: \(Thread.current)")
+    }
 }
 
 
