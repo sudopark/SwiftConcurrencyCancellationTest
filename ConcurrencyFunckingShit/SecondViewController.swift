@@ -32,26 +32,57 @@ final class AsyncWorker: Sendable {
     
     func makeRandIntVerySlowly() async throws -> Int {
         // 5. task가 cancel됨에 따라 이미 실행중(여기서는 sleep?) 임에도 불구하고 해당 구문이 끝나게 되며
-//        try await Task.sleep(nanoseconds: 1_000_000_000 * 100) // sleep for 100 seconds
+        try await Task.sleep(nanoseconds: 1_000_000_000 * 100) // sleep for 100 seconds
 //        try await Task.sleep(nanoseconds: 1_000_000_000 * 3) // sleep for 3 seconds
         
 //        let randDelay: UInt64 = (300_000...300_100).randomElement()! * 1_000
 //        try await Task.sleep(nanoseconds: randDelay) // sleep for rand
-//        return Int.random(in: 1...10)
+        return Int.random(in: 1...10)
         
-        return await withCheckedContinuation { continuation in
-            Thread.detachNewThread {
-                print("     will resume from: \(Thread.current)")
-                let delay = TimeInterval((800...801).randomElement()!) / 1000
-                Thread.sleep(forTimeInterval: delay)
-                continuation.resume(returning: 0)
-            }
-//            let delay = TimeInterval((800...810).randomElement()!) / 1000
-//            DispatchQueue(label: "some:\(Int.random(in: 0...10))").asyncAfter(deadline: .now() + delay) {
+//        return await withCheckedContinuation { continuation in
+//            Thread.detachNewThread {
 //                print("     will resume from: \(Thread.current)")
+//                let delay = TimeInterval((800...801).randomElement()!) / 1000
+//                Thread.sleep(forTimeInterval: delay)
 //                continuation.resume(returning: 0)
 //            }
-        }
+//        }
+    }
+}
+
+
+import Combine
+
+protocol Cancellable {
+    func cancel()
+}
+
+//extension AnyCancellable: @unchecked Cancellable { }
+extension Task: Cancellable { }
+
+final class TaskCancelBag: @unchecked Sendable {
+    
+    private let lock = NSRecursiveLock()
+    private var cancellables: [Cancellable]? = []
+    
+    deinit {
+        self.cancellables?.forEach { $0.cancel() }
+        self.cancellables = nil
+    }
+    
+    func append(_ task: Cancellable) {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        self.cancellables?.append(task)
+    }
+}
+
+actor CancelActor {
+    
+    private var cancellables: [Cancellable]? = []
+    
+    nonisolated func append(_ task: Cancellable) async {
+        await self.cancellables?.append(task)
     }
 }
 
@@ -74,25 +105,11 @@ final class SecondViewModel: Sendable {
         self.worker = worker
     }
     
-//    private var resultInt: Int?
-    private var task: Task<Void, Error>?
-    private var task2: Task<Void, Error>?
-    private var tasks: [Task<Void, Error>]?
-    private var taskWithGroups: Task<Void, Error>?
-    
-    
     deinit {
-        // 3 다행히 vm은 view의 라이프사이클에 맞추어 해제될 수 있고
-        print("deinit secondViewModel")
-        // 4. 이경우 앞서 detach 시킨 task를 cancel시킴
-        
-        // 7. task cancel을 안시킨다면 task에 의해 캡처된 worker는 끝날때까지 메모리 해제가 안됨
-        // + 그리고 Task 생성시에 vm도 같이 캡처되었다면 역시 메모리 해제 안될거임
-        self.task?.cancel()
-        self.task2?.cancel()
-        self.tasks?.forEach { $0.cancel() }
-        self.taskWithGroups?.cancel()
+        print("deinit second viewModel")
     }
+    
+    private let cancellBag = TaskCancelBag()
     
     func makeInt() {
         
@@ -127,52 +144,30 @@ final class SecondViewModel: Sendable {
 //            }
 //        }
         
-        self.tasks = (0..<1_00).map { seq -> Task<Void, Error> in
-            Task.detached { [weak self] in
-                do {
-                    // ** detach 자체가 여러 스렉드에서 발생하지 않음
-                    print("detached thread -> \(Thread.current)")
-                    // ** makeRandIntVerySlowly가 동작하며 스레드가 바뀌고 레이스컨디션이 일어날 수 있지만
-                    let int = try await self?.worker.makeRandIntVerySlowly()
-                    // ** await가 끝나고 복귀한 경우에 스레드가 불필요하게 스위칭되지 않음 -> 상황에 따라 바뀔수는 있지만 거의 안바뀜 -> 이로인해 increaseInt시에 레이스 컨디션이 일어나지 않은듯
-                    // => 하지만 엑터로 ㅌ커버해줄 필요는 있다
-                    // 2-4.위의 작업들은 vm이 MainActor라서 순차적으로 작업이 진행되지 않더라도 raceCondition은 발생안함
-//                    self?.resultInt = (self?.resultInt ?? 0) + 1
-//                    print("case3: int made -> seq: \(seq) \(self?.resultInt) thread: \(Thread.current)")
-//                    print("thread: \(Thread.current)")
-//                    self?.increaseInt(seq)
-                    await self?.state.updateResult(int ?? 0, from: seq)
+        (0..<100).forEach { seq in
+            self.cancellBag.append(
+                Task.detached { [weak self] in
+                    do {
+                        // ** detach 자체가 여러 스렉드에서 발생하지 않음
+                        print("detached thread -> \(Thread.current)")
+                        // ** makeRandIntVerySlowly가 동작하며 스레드가 바뀌고 레이스컨디션이 일어날 수 있지만
+                        let int = try await self?.worker.makeRandIntVerySlowly()
+                        // ** await가 끝나고 복귀한 경우에 스레드가 불필요하게 스위칭되지 않음 -> 상황에 따라 바뀔수는 있지만 거의 안바뀜 -> 이로인해 increaseInt시에 레이스 컨디션이 일어나지 않은듯
+                        // => 하지만 엑터로 ㅌ커버해줄 필요는 있다
+                        // 2-4.위의 작업들은 vm이 MainActor라서 순차적으로 작업이 진행되지 않더라도 raceCondition은 발생안함
+    //                    self?.resultInt = (self?.resultInt ?? 0) + 1
+    //                    print("case3: int made -> seq: \(seq) \(self?.resultInt) thread: \(Thread.current)")
+    //                    print("thread: \(Thread.current)")
+    //                    self?.increaseInt(seq)
+                        await self?.state.updateResult(int ?? 0, from: seq)
+                    }
+                    catch {
+                        print("case3: make int error: \(error)")
+                    }
                 }
-                catch {
-                    print("case3: make int error: \(error)")
-                }
-            }
+            )
         }
-//
-//        self.taskWithGroups = Task {
-//
-//            _ = try await withThrowingTaskGroup(of: Void.self) { group in
-//                (0..<100).forEach { seq in
-//                    _ = group.addTaskUnlessCancelled { [weak self] in
-//                        do {
-//                            let _ = try await self?.worker.makeRandIntVerySlowly()
-//                            self?.increaseInt(seq)
-//                        } catch { }
-//                    }
-//                }
-//            }
-//
-//            try Task.checkCancellation()
-//        }
-        
     }
-    
-//    private func increaseInt(_ seq: Int) {
-////        let value = self.subject.value
-////        self.subject.send(value + 1)
-//        self.resultInt = (self.resultInt ?? 0) + 1
-//        print("case3: int made -> seq: \(seq) \(resultInt) thraed: \(Thread.current)")
-//    }
 }
 
 
